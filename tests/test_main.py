@@ -24,6 +24,7 @@ class TestHealthEndpoint:
         assert data["status"] == "healthy"
         assert "version" in data
         assert "environment" in data
+        assert "timestamp" in data
 
 
 class TestCalculateEndpoint:

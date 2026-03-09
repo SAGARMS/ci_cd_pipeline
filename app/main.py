@@ -1,5 +1,6 @@
 """Main Flask application entry point."""
 
+import datetime
 import os
 
 from flask import Flask, jsonify, request
@@ -20,6 +21,7 @@ def health():
             "status": "healthy",
             "version": APP_VERSION,
             "environment": ENVIRONMENT,
+            "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         }
     )
 
