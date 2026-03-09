@@ -1,0 +1,143 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Production Deployment  –  manual trigger (workflow_dispatch) OR
+#                           triggered after staging succeeds
+#
+# Gate: Requires manual approval via GitHub Environment protection rules.
+# Promotion Rule: Copy the tested staging image to the prod registry.
+#                 Zero rebuilds – 100% bit-for-bit identity guaranteed.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Deploy to Production
+
+on:
+  # Manual trigger with explicit SHA input for traceability
+  workflow_dispatch:
+    inputs:
+      git_sha:
+        description: "Git SHA to deploy (must already be deployed to staging)"
+        required: true
+        type: string
+      reason:
+        description: "Reason for deployment"
+        required: true
+        type: string
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GAR_REGION: us-central1
+  STAGING_REPO: staging-images
+  PROD_REPO: prod-images
+  IMAGE_NAME: ci-cd-demo
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1: Pre-flight validation
+  # ────────────────────────────────────────────────────────────────────────────
+  pre-flight:
+    name: Pre-flight Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Log deployment intent
+        run: |
+          echo "## Production Deployment Request" >> $GITHUB_STEP_SUMMARY
+          echo "| Field  | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| SHA    | \`${{ github.event.inputs.git_sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Reason | ${{ github.event.inputs.reason }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Actor  | ${{ github.actor }} |" >> $GITHUB_STEP_SUMMARY
+
+      - name: Validate SHA format
+        run: |
+          SHA="${{ github.event.inputs.git_sha }}"
+          if [[ ! "$SHA" =~ ^[0-9a-f]{7,40}$ ]]; then
+            echo "ERROR: Invalid SHA format: $SHA"
+            exit 1
+          fi
+          echo "SHA validated: $SHA"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2: Manual approval gate  (configured in GitHub Environment settings)
+  #         Go to: Settings → Environments → production → Required reviewers
+  # ────────────────────────────────────────────────────────────────────────────
+  await-approval:
+    name: Await Manual Approval
+    runs-on: ubuntu-latest
+    needs: pre-flight
+    environment: production   # <── This is the approval gate
+
+    steps:
+      - name: Approval granted
+        run: echo "Manual approval received. Proceeding with production deployment."
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3: Promote staging image → prod registry (no rebuild)
+  # ────────────────────────────────────────────────────────────────────────────
+  promote-to-prod:
+    name: Promote Image to Production
+    runs-on: ubuntu-latest
+    needs: await-approval
+
+    outputs:
+      prod-image: ${{ steps.promote.outputs.prod-image }}
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${GAR_REGION}-docker.pkg.dev --quiet
+
+      - name: Promote staging → production registry
+        id: promote
+        run: |
+          SHORT_SHA="${{ github.event.inputs.git_sha }}"
+          STAGING_IMAGE="${GAR_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${STAGING_REPO}/${IMAGE_NAME}:staging-${SHORT_SHA}"
+          PROD_IMAGE="${GAR_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${PROD_REPO}/${IMAGE_NAME}:prod-${SHORT_SHA}"
+
+          docker pull "${STAGING_IMAGE}"
+          docker tag  "${STAGING_IMAGE}" "${PROD_IMAGE}"
+          docker push "${PROD_IMAGE}"
+
+          echo "prod-image=${PROD_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Promoted: ${STAGING_IMAGE} → ${PROD_IMAGE}"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 4: Deploy to Production
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: promote-to-prod
+    environment:
+      name: production
+      url: https://app.example.com
+
+    steps:
+      - name: Blue/Green Deploy
+        run: |
+          echo "Deploying ${{ needs.promote-to-prod.outputs.prod-image }} to production..."
+          # gcloud run deploy ci-cd-demo \
+          #   --image ${{ needs.promote-to-prod.outputs.prod-image }} \
+          #   --region us-central1 \
+          #   --platform managed \
+          #   --no-traffic     # deploy new revision without routing traffic yet
+
+      - name: Production smoke test
+        run: |
+          echo "Running production smoke tests..."
+          # curl -f https://app.example.com/health
+
+      - name: Shift traffic (100%)
+        run: |
+          echo "Shifting 100% traffic to new revision..."
+          # gcloud run services update-traffic ci-cd-demo --to-latest
+
+      - name: Summary
+        run: |
+          echo "### Production Deployment Complete :tada:" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ needs.promote-to-prod.outputs.prod-image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**SHA:** \`${{ github.event.inputs.git_sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployed by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Reason:** ${{ github.event.inputs.reason }}" >> $GITHUB_STEP_SUMMARY

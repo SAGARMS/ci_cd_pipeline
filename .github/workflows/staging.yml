@@ -1,0 +1,114 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Staging Deployment  –  triggers on merge / push to main
+#
+# Promotion Rule: REUSE the exact image built in feature CI (no rebuild).
+#   The Git SHA tag ensures bit-for-bit identity between Dev and Staging.
+# ─────────────────────────────────────────────────────────────────────────────
+name: Deploy to Staging
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  GAR_REGION: us-central1
+  GAR_REPO: dev-images
+  STAGING_REPO: staging-images
+  IMAGE_NAME: ci-cd-demo
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 1: Run the full test suite one more time on main
+  # ────────────────────────────────────────────────────────────────────────────
+  verify:
+    name: Verify on Main
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: |
+          black --check .
+          flake8 .
+
+      - name: Test
+        run: pytest --cov=app --cov-report=term-missing
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 2: Promote image from Dev → Staging registry
+  #         No rebuild – pull the SHA-tagged image built in feature CI
+  # ────────────────────────────────────────────────────────────────────────────
+  promote-to-staging:
+    name: Promote Image to Staging
+    runs-on: ubuntu-latest
+    needs: verify
+    environment: staging   # GitHub environment (can add protection rules here)
+
+    outputs:
+      staging-image: ${{ steps.promote.outputs.staging-image }}
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker ${GAR_REGION}-docker.pkg.dev --quiet
+
+      # ── Pull the exact image built during feature CI (immutable SHA tag) ───
+      - name: Promote image to Staging registry
+        id: promote
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          DEV_IMAGE="${GAR_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:main-${SHORT_SHA}"
+          STAGING_IMAGE="${GAR_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${STAGING_REPO}/${IMAGE_NAME}:staging-${SHORT_SHA}"
+
+          docker pull "${DEV_IMAGE}"
+          docker tag  "${DEV_IMAGE}" "${STAGING_IMAGE}"
+          docker push "${STAGING_IMAGE}"
+
+          echo "staging-image=${STAGING_IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "Promoted: ${DEV_IMAGE} → ${STAGING_IMAGE}"
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # JOB 3: Deploy to Staging (placeholder – swap with your cloud deploy step)
+  # ────────────────────────────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging Environment
+    runs-on: ubuntu-latest
+    needs: promote-to-staging
+    environment:
+      name: staging
+      url: https://staging.example.com
+
+    steps:
+      - name: Deploy to Staging
+        run: |
+          echo "Deploying ${{ needs.promote-to-staging.outputs.staging-image }} to staging..."
+          # Replace this echo with your actual deploy command, e.g.:
+          # gcloud run deploy ci-cd-demo \
+          #   --image ${{ needs.promote-to-staging.outputs.staging-image }} \
+          #   --region us-central1 \
+          #   --platform managed
+
+      - name: Staging smoke test
+        run: |
+          echo "Running smoke tests against https://staging.example.com/health ..."
+          # curl -f https://staging.example.com/health
+
+      - name: Summary
+        run: |
+          echo "### Staging Deployment Complete :white_check_mark:" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ needs.promote-to-staging.outputs.staging-image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** https://staging.example.com" >> $GITHUB_STEP_SUMMARY
