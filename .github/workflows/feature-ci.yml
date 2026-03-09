@@ -21,8 +21,8 @@ on:
 env:
   # ── Registry settings (set these in repo Settings → Secrets & Variables) ──
   GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  GAR_REGION: us-central1
-  GAR_REPO: dev-images
+  GAR_REGION: asia-south1
+  GAR_REPO: python-cicd-demo
   IMAGE_NAME: ci-cd-demo
 
 jobs:
